@@ -2,10 +2,22 @@
 
 ## 1. System Design
 
+Based on the PawPal+ scenario, a user should be able to:
+
+Register a new pet under an owner's profile.
+Schedule a new care task (like a feeding, walk, or medication) for a specific pet.
+View a sorted daily schedule of all pending tasks to keep the pet's routine on track.
+
 **a. Initial design**
 
 - Briefly describe your initial UML design.
+In the UML diagram that I just made, I have added multiple objects (Owner, Pets, Task, Scheduler) and they have certain attributes such as the name, contact info and list of pets for the owner, species and age for the Pet, etc. They also have certain methods which are unique to them. Owner owns pets, pets have tasks and those tasks are managed by the scheduler.
+
 - What classes did you include, and what responsibilities did you assign to each?
+For the Owner: They can add pet, remove pet, get list of pets.
+Class Pets: Can add a task, remove a task, and get tasks list.
+Class Scheduler: Can schedule a task, remove task, get, sort tasks and check for conflicts.
+Class Tasks: Can be changed to be mark completed and update time 
 
 **b. Design changes**
 
