@@ -62,3 +62,28 @@ pip install -r requirements.txt
 5. Add tests to verify key behaviors.
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
+
+## Testing PawPal+
+
+### Running the test suite
+
+```bash
+python -m pytest tests/test_pawpal.py -v
+```
+
+### What the tests cover
+
+| Test | Behavior verified |
+|------|------------------|
+| `test_mark_completed` | A task's `is_completed` flag flips to `True` after `mark_completed()` |
+| `test_add_task_increases_count` | Adding a task to a `Pet` increases its task count by 1 |
+| `test_sort_by_time_returns_chronological_order` | `Scheduler.sort_by_time()` returns tasks in ascending `due_time` order regardless of insertion order |
+| `test_mark_daily_task_complete_schedules_next_day` | Completing a `"daily"` task auto-creates a new task scheduled exactly 1 day later, with `is_completed=False` |
+| `test_conflict_detection_flags_duplicate_times` | `get_conflict_warnings()` produces a `"WARNING:"` string when two tasks share the same `due_time` |
+| `test_no_conflict_when_times_differ` | `get_conflict_warnings()` returns an empty list when tasks are scheduled at different times (no false positives) |
+
+### Confidence Level
+
+★★★★☆ (4 / 5)
+
+The core scheduling behaviors — chronological sorting, daily recurrence, and exact-time conflict detection — are all verified and passing. The suite covers the most critical paths through `Scheduler`. The one star withheld reflects gaps that remain: weekly recurrence, the 30-minute window conflict check (`check_for_conflicts`), multi-filter combinations in `filter_tasks`, and overdue-task edge cases are not yet tested.
