@@ -197,12 +197,16 @@ class Scheduler:
                     conflicts.append((t1, t2))
         return conflicts
 
-    def get_conflict_warnings(self) -> List[str]:
-        """Return a list of human-readable warning strings for exact-time conflicts.
+    def get_conflict_warnings(self, window_minutes: int = 30) -> List[str]:
+        """Return human-readable warning strings for tasks within a time window.
 
         Checks every pair of incomplete tasks across all pets. When two tasks
-        share the same due_time, a warning is produced that names both tasks,
-        their shared time, and which pet(s) they belong to.
+        are scheduled within window_minutes of each other, a warning is produced
+        that names both tasks, their times, and which pet(s) they belong to.
+
+        Args:
+            window_minutes: Gap threshold in minutes (default 30). Tasks closer
+                            than this are flagged as a scheduling conflict.
 
         Returns an empty list (never raises) when no conflicts are found.
         """
@@ -214,22 +218,32 @@ class Scheduler:
         }
 
         all_tasks = [t for t in self.get_all_tasks() if not t.is_completed]
+        window = timedelta(minutes=window_minutes)
         warnings: List[str] = []
 
         for i, t1 in enumerate(all_tasks):
             for t2 in all_tasks[i + 1:]:
-                if t1.due_time == t2.due_time:
+                gap = abs(t1.due_time - t2.due_time)
+                if gap <= window:
                     pet1 = task_to_pet.get(id(t1), "Unknown")
                     pet2 = task_to_pet.get(id(t2), "Unknown")
-                    time_str = t1.due_time.strftime("%I:%M %p")
+                    t1_str = t1.due_time.strftime("%I:%M %p")
+                    t2_str = t2.due_time.strftime("%I:%M %p")
+                    gap_mins = int(gap.total_seconds() // 60)
                     scope = (
                         f"same pet ({pet1})" if pet1 == pet2
                         else f"{pet1} and {pet2}"
                     )
-                    warnings.append(
-                        f"WARNING: '{t1.title}' and '{t2.title}' "
-                        f"are both scheduled at {time_str} ({scope})"
-                    )
+                    if gap_mins == 0:
+                        warnings.append(
+                            f"'{t1.title}' and '{t2.title}' are both scheduled at "
+                            f"{t1_str} ({scope}) — exact overlap!"
+                        )
+                    else:
+                        warnings.append(
+                            f"'{t1.title}' ({t1_str}) and '{t2.title}' ({t2_str}) "
+                            f"are only {gap_mins} min apart ({scope})"
+                        )
 
         return warnings
 

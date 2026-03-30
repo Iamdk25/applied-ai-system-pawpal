@@ -179,10 +179,10 @@ else:
         st.success(st.session_state.completion_msg)
         st.session_state.completion_msg = None
 
-    # ── Conflict warnings ─────────────────────────────────────────
-    conflict_warnings = scheduler.get_conflict_warnings()
+    # ── Conflict warnings (30-minute window) ─────────────────────
+    conflict_warnings = scheduler.get_conflict_warnings(window_minutes=30)
     if conflict_warnings:
-        st.error(f"⚠️ {len(conflict_warnings)} scheduling conflict(s) detected:")
+        st.error(f"⚠️ {len(conflict_warnings)} scheduling conflict(s) detected (within 30 min):")
         for w in conflict_warnings:
             st.warning(w)
     else:
@@ -190,9 +190,13 @@ else:
 
     st.divider()
 
-    # ── Pet filter only — status is handled by the two sections ───
-    pet_filter_options = ["All pets"] + [p.name for p in owner.get_pets()]
-    pet_filter = st.selectbox("Filter by pet", pet_filter_options, key="filter_pet")
+    # ── Filters and sort order ────────────────────────────────────
+    col_filter, col_sort = st.columns(2)
+    with col_filter:
+        pet_filter_options = ["All pets"] + [p.name for p in owner.get_pets()]
+        pet_filter = st.selectbox("Filter by pet", pet_filter_options, key="filter_pet")
+    with col_sort:
+        sort_order = st.radio("Sort by", ["Time", "Priority"], horizontal=True, key="sort_order")
     pet_arg = None if pet_filter == "All pets" else pet_filter
 
     # Build task → pet-name lookup once (O(n)) before any loops
@@ -207,12 +211,14 @@ else:
         pet_name = task_to_pet.get(id(task), "?")
         due_str  = task.due_time.strftime("%a %b %d · %I:%M %p")   # date + time
         freq_tag = f"({task.frequency})"
+        overdue  = task.is_overdue()
+        label    = f"`{due_str}` [{task.priority.upper()}] **{task.title}** — {pet_name} {freq_tag}"
         col_info, col_btn = st.columns([5, 1])
         with col_info:
-            st.write(
-                f"`{due_str}` [{task.priority.upper()}] "
-                f"**{task.title}** — {pet_name} {freq_tag}"
-            )
+            if overdue:
+                st.warning(f"OVERDUE · {label}")
+            else:
+                st.write(label)
         with col_btn:
             if st.button("Done", key=f"complete_{pet_name}_{index}_{task.title}"):
                 next_task = scheduler.mark_task_complete(task)
@@ -230,7 +236,11 @@ else:
 
     # ── Section A: Upcoming (pending) tasks ───────────────────────
     pending = scheduler.filter_tasks(pet_name=pet_arg, status="pending")
-    st.markdown(f"**Upcoming — {len(pending)} task(s)** *(sorted by date & time)*")
+    if sort_order == "Priority":
+        from pawpal_system import PRIORITY_ORDER
+        pending = sorted(pending, key=lambda t: (PRIORITY_ORDER.get(t.priority, 1), t.due_time))
+    sort_label = "by priority then time" if sort_order == "Priority" else "by date & time"
+    st.markdown(f"**Upcoming — {len(pending)} task(s)** *({sort_label})*")
     if pending:
         for i, task in enumerate(pending):
             render_task_row(task, i)

@@ -12,6 +12,52 @@ A busy pet owner needs help staying consistent with pet care. They want an assis
 
 Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
 
+## 📸 Demo
+
+<a href="pawpal_app.png" target="_blank"><img src='pawpal_app.png' title='PawPal App' width='' alt='PawPal App' class='center-block' /></a>
+
+---
+
+## Features
+
+### Pet & owner management
+- Register multiple pets under one owner profile (name, species, age)
+- Remove pets at any time; their tasks are cleaned up automatically
+
+### Task management
+- Add care tasks to any pet: **walk**, **feeding**, **medication**, or **appointment**
+- Set a due time and recurrence frequency: **once**, **daily**, or **weekly**
+- Priority is inferred automatically from the category — no manual input needed:
+  - `medication` / `appointment` → **HIGH**
+  - `feeding` → **MEDIUM**
+  - `walk` → **LOW**
+
+### Sorting
+- **Sort by time** — tasks appear in ascending `due_time` order (chronological daily schedule)
+- **Sort by priority** — HIGH tasks float to the top; `due_time` is used as a tie-breaker within each priority tier
+
+### Conflict detection
+- Scans every pair of incomplete tasks and flags any two scheduled within **30 minutes** of each other
+- Warnings appear at the top of the schedule with the exact gap in minutes and which pet(s) are affected
+- Returns an empty list (no exception) when the schedule is clean
+
+### Overdue task warnings
+- Any pending task whose `due_time` has already passed is highlighted with `st.warning` in the UI
+- Overdue detection uses `datetime.now()` at render time so it stays current as the day progresses
+
+### Recurring task automation
+- Marking a task complete auto-schedules the next occurrence via Python's `timedelta`:
+  - **Daily** → `due_time + 1 day`
+  - **Weekly** → `due_time + 7 days`
+  - **One-time** → no new task is created
+- The next occurrence is a fresh `Task` object (cloned via `dataclasses.replace()`); the completed task is never mutated
+
+### Filtering
+- Filter the schedule to a single pet or view all pets at once
+- Separate views for **pending** and **completed** tasks
+
+---
+
 ## What you will build
 
 Your final app should:
@@ -41,7 +87,7 @@ The `Scheduler` class in `pawpal_system.py` goes beyond a simple task list with 
 The next-occurrence `Task` is cloned with `dataclasses.replace()` so the original is never mutated, then added to the same pet automatically.
 
 ### Conflict detection
-`get_conflict_warnings()` scans every pair of incomplete tasks for an **exact** same `due_time` and returns plain-English warning strings (e.g. `"WARNING: 'Walk' and 'Medication' are both scheduled at 09:00 AM (same pet (Rex))"`). The broader `check_for_conflicts(window_minutes=30)` catches near-collisions within a configurable time window. Neither method raises an exception — they return an empty list when the schedule is clean.
+`get_conflict_warnings(window_minutes=30)` scans every pair of incomplete tasks and flags any two whose `due_time` falls within the configurable window (default 30 minutes). It returns plain-English strings such as `"'Walk' (08:00 AM) and 'Medication' (08:15 AM) are only 15 min apart (same pet (Rex))"`. Exact-time overlaps are called out explicitly as `"exact overlap!"`. The lower-level `check_for_conflicts(window_minutes)` returns raw `(Task, Task)` pairs for programmatic use. Neither method raises an exception — both return an empty list when the schedule is clean.
 
 ## Getting started
 
