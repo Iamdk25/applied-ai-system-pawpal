@@ -22,7 +22,16 @@ Class Tasks: Can be changed to be mark completed and update time
 **b. Design changes**
 
 - Did your design change during implementation?
+Yes I had to make some changes to the system to ensure that there are no bottlenecks or missing relationships. AI Agent was able to find many missing links in the backend code which were not mentioned in the UML diagram.
+
 - If yes, describe at least one change and why you made it.
+The first change that AI made was to the Scheduler class which had no link to the Pet or the Owner which can lead to no way for the system to realize which pet the task belongs to in case the owner has multiple pets.
+
+The next change was to the Task class which had no pet back-reference and would loose contect of which pet the task is for upon implementation. A pet_name: str (or a Pet reference) on Task would fix this.
+
+Also the owner and the scheduler were not connected so there was no way for the owner to interact with the scheduler to book and view tasks for their pets. This was fixed by adding self.scheduler = scheduler in owner class.
+
+Agent also pointed out how the sort_tasks_by_time() will be slow if due time is a str so it was changed to datetime. Also tasks on Pet and all_tasks on Scheduler were duplicated state which would result in the task in pet.add_task() not appearing in the scheduler.all_tasks and vice-versa, so we made the scheduler the single source of truth and had pet.get_tasks() to query it.
 
 ---
 
