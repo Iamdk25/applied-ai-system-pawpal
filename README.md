@@ -1,236 +1,292 @@
-# PawPal+ — Agentic Pet Care Planner
+# 🐾 PawPal+ — Agentic Pet Care Planner
 
-> **Applied AI System** capstone (Week 9). This project extends my Module 2
-> mini-project, **PawPal+** — a Streamlit-based pet care task tracker that
-> represented pets and their owners and used algorithmic logic (sorting,
-> filtering, conflict detection, recurrence) to organize daily care tasks. The
-> original system required users to enter every task by hand. **This version
-> adds an agentic Planner** that turns a one-line care goal into a
-> conflict-free, multi-day schedule using Google Gemini.
-
-## Scenario
-
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
-
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
-
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
-
-## 📸 Demo
-
-<a href="pawpal_app.png" target="_blank"><img src='pawpal_app.png' title='PawPal App' width='' alt='PawPal App' class='center-block' /></a>
+> **Applied AI System** · Final Capstone Project
 
 ---
 
-## Features
+## 📌 Original Project
 
-### Pet & owner management
-- Register multiple pets under one owner profile (name, species, age)
-- Remove pets at any time; their tasks are cleaned up automatically
-
-### Task management
-- Add care tasks to any pet: **walk**, **feeding**, **medication**, or **appointment**
-- Set a due time and recurrence frequency: **once**, **daily**, or **weekly**
-- Priority is inferred automatically from the category — no manual input needed:
-  - `medication` / `appointment` → **HIGH**
-  - `feeding` → **MEDIUM**
-  - `walk` → **LOW**
-
-### Sorting
-- **Sort by time** — tasks appear in ascending `due_time` order (chronological daily schedule)
-- **Sort by priority** — HIGH tasks float to the top; `due_time` is used as a tie-breaker within each priority tier
-
-### Conflict detection
-- Scans every pair of incomplete tasks and flags any two scheduled within **30 minutes** of each other
-- Warnings appear at the top of the schedule with the exact gap in minutes and which pet(s) are affected
-- Returns an empty list (no exception) when the schedule is clean
-
-### Overdue task warnings
-- Any pending task whose `due_time` has already passed is highlighted with `st.warning` in the UI
-- Overdue detection uses `datetime.now()` at render time so it stays current as the day progresses
-
-### Recurring task automation
-- Marking a task complete auto-schedules the next occurrence via Python's `timedelta`:
-  - **Daily** → `due_time + 1 day`
-  - **Weekly** → `due_time + 7 days`
-  - **One-time** → no new task is created
-- The next occurrence is a fresh `Task` object (cloned via `dataclasses.replace()`); the completed task is never mutated
-
-### Filtering
-- Filter the schedule to a single pet or view all pets at once
-- Separate views for **pending** and **completed** tasks
+This project extends my **Module 2 mini-project, PawPal+** — a Streamlit-based pet care task tracker. The original app let a pet owner register pets, manually create care tasks (walks, feedings, medications, appointments), and view a prioritized daily schedule with conflict detection. All scheduling was algorithmic — sorting by time or priority, flagging tasks within a 30-minute window, and auto-generating recurring tasks via `timedelta`. Every single task had to be entered by hand.
 
 ---
 
-## What you will build
+## 🎯 Title & Summary
 
-Your final app should:
+**PawPal+** is an **AI-powered pet care planning assistant** that transforms a simple one-line care goal (e.g. *"Help my senior dog lose weight"*) into a complete, conflict-free, 7-day schedule of tasks — automatically.
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+### Why it matters
 
-## Smarter Scheduling
+Pet owners often know *what* they want for their pet (weight loss, potty training, post-surgery recovery) but not *how* to structure a daily routine to achieve it. PawPal+ bridges that gap by combining an **AI Planner** (Google Gemini) with a **deterministic Reviewer** (Python conflict checker) in an agentic loop that drafts, validates, revises, and stages a plan — all before the owner clicks "Confirm."
 
-The `Scheduler` class in `pawpal_system.py` goes beyond a simple task list with four algorithmic features:
+### Key capabilities
 
-### Sort by time
-`sort_by_time()` uses Python's `sorted()` with a `lambda` key to order every task across all pets by `due_time` in ascending order, so the daily schedule always reads chronologically regardless of the order tasks were added.
+| Feature | Description |
+|---|---|
+| **Manual Task Management** | Add, remove, complete tasks with auto-priority inference and recurrence |
+| **AI Planner (Agentic)** | Natural-language goal → structured 7-day plan via Gemini function calling |
+| **Plan → Review → Revise Loop** | Deterministic conflict checker validates AI proposals and feeds back warnings |
+| **Human-in-the-Loop** | Plans are staged for review — nothing is applied until the user confirms |
+| **Guardrails** | Input validation, banned-token denylist, bounded iterations, structured logging |
+| **Reliability Eval** | 6-case automated eval harness + 16 offline unit tests |
 
-### Filter tasks
-`filter_tasks(pet_name, status, category)` applies AND logic across up to three dimensions — you can ask for "Rex's pending medication tasks" in a single call. It reuses the same sorted output as `sort_by_time()` so results are always in chronological order.
+---
 
-### Recurring task automation
-`mark_task_complete(task)` marks a task done and immediately schedules the next occurrence using Python's `timedelta`:
-- **Daily** tasks → `due_time + timedelta(days=1)`
-- **Weekly** tasks → `due_time + timedelta(weeks=1)`
-- **One-time** tasks → no new task is created
+## 🏗️ Architecture Overview
 
-The next-occurrence `Task` is cloned with `dataclasses.replace()` so the original is never mutated, then added to the same pet automatically.
-
-### Conflict detection
-`get_conflict_warnings(window_minutes=30)` scans every pair of incomplete tasks and flags any two whose `due_time` falls within the configurable window (default 30 minutes). It returns plain-English strings such as `"'Walk' (08:00 AM) and 'Medication' (08:15 AM) are only 15 min apart (same pet (Rex))"`. Exact-time overlaps are called out explicitly as `"exact overlap!"`. The lower-level `check_for_conflicts(window_minutes)` returns raw `(Task, Task)` pairs for programmatic use. Neither method raises an exception — both return an empty list when the schedule is clean.
-
-## AI Planner (Agentic Workflow)
-
-The **Planner Agent** turns a high-level pet care goal (e.g. *"Help my senior
-dog lose weight"*) into a 7-day, conflict-free schedule. It runs an agentic
-**Planner → Reviewer → Revise** loop:
-
-1. **Planner** — The agent drafts a multi-day plan using Google Gemini
-   (`gemini-2.5-flash` by default) with function calling. The model returns
-   structured JSON via a `submit_plan` function declaration, enforced by
-   `FunctionCallingConfig(mode="ANY")`.
-2. **Reviewer** — `Scheduler.validate_proposed_changes` (deterministic
-   Python) checks the proposed plan against the user's existing schedule for
-   30-minute conflicts. Pre-existing user collisions are ignored — only pairs
-   involving at least one proposed change are flagged.
-3. **Revise** — if the Reviewer finds conflicts, the human-readable warning
-   strings are fed back into the next Planner call. The loop runs up to N
-   iterations (default 3).
-4. **Confirm & commit** — once the plan is clean, the Streamlit UI shows a
-   summary of proposed adds and reschedules. Nothing is applied to the pet
-   until the user clicks **Confirm & Apply**.
-
-### Architecture
-
-![System architecture](assets/architecture.png)
+![System Architecture](assets/architecture.png)
 
 > Mermaid source in [`assets/architecture.mmd`](assets/architecture.mmd).
 
-### Setup
+The system follows an **agentic Planner → Reviewer → Revise** architecture:
 
-Copy `.env.example` to `.env` and fill in your `GEMINI_API_KEY`:
+1. **User** enters a high-level care goal and selects a pet in the Streamlit UI (`app.py`).
+2. **Agent Orchestrator** (`pawpal_agent.py`) builds a prompt with the pet profile, existing tasks, and any prior reviewer feedback, then calls the **Planner LLM** (Google Gemini `gemini-2.5-flash`).
+3. **Planner LLM** returns structured JSON via a `submit_plan` function call (enforced by `FunctionCallingConfig(mode="ANY")`), proposing new tasks and/or reschedules.
+4. **JSON Parser & Guardrails** validates the response: checks categories, frequencies, time format, day offsets, and clips past-time proposals to tomorrow.
+5. **Reviewer** (`Scheduler.validate_proposed_changes`) — a deterministic Python function — checks the proposed plan against the owner's existing schedule for 30-minute conflicts. Pre-existing user conflicts are ignored.
+6. **If conflicts exist**, the human-readable warning strings are fed back into the next Planner call. The loop runs up to **3 iterations** (configurable).
+7. **If clean**, the plan is **staged** as an `AgentResult` and displayed in the UI for user review.
+8. **User clicks Confirm & Apply** → `commit_agent_result` adds tasks to the pet.
+9. **Agent Logging** (`agent_logging.py`) records every event as JSON lines to `pawpal_agent.log`.
 
-```bash
-cp .env.example .env
-# then edit .env and paste your key
+### File structure
+
+```
+├── app.py                  # Streamlit UI (all sections)
+├── pawpal_system.py        # Core classes: Owner, Pet, Task, Scheduler
+├── pawpal_agent.py         # AI Planner agent (Gemini function calling)
+├── agent_logging.py        # JSON-line structured logger
+├── eval_agent.py           # 6-case reliability eval harness
+├── model_card.md           # AI reflection, guardrails, eval results
+├── reflection.md           # Module 2 design reflection
+├── requirements.txt        # Python dependencies
+├── .env.example            # Environment variable template
+├── assets/
+│   ├── architecture.mmd    # Mermaid diagram source
+│   └── architecture.png    # Rendered system diagram
+└── tests/
+    ├── test_pawpal.py      # 6 original scheduler tests
+    └── test_agent.py       # 10 agent tests (offline, mocked)
 ```
 
-Override the default model with `PAWPAL_AGENT_MODEL` (e.g. `gemini-2.5-pro`).
+---
 
-### Sample interactions
+## ⚙️ Setup Instructions
 
-| Goal | Existing tasks | Result |
-|---|---|---|
-| *"Help my senior dog lose weight over the next week"* | one daily walk at 08:00 | 8 tasks added across 7 days, 1 iteration |
-| *"Potty train my 3-month-old puppy"* | (none) | 12 tasks added (feeding, bathroom breaks, short walks), 1 iteration |
-| *"Recovery routine after surgery"* | medication at 08:00 daily | 6 tasks; iteration 1 collided at 08:00, iteration 2 spread to 10:00 / 14:00 / 18:00 |
+### Prerequisites
+- Python 3.10+
+- A [Google Gemini API key](https://aistudio.google.com/apikey) (free tier works, billing recommended)
 
-The reasoning trace expander shows each iteration's proposed tasks, the
-LLM's stated reasoning, and any reviewer warnings that triggered a revision.
-
-### Guardrails & reliability
-
-- **Goal validation** — empty goals, goals shorter than 5 chars, longer than
-  500 chars, or containing a banned token (e.g. *"ignore previous"*) are
-  rejected before any LLM call. The agent surfaces `error="invalid_goal: ..."`.
-- **Schema-forced output** — `FunctionCallingConfig(mode="ANY")` makes Gemini
-  always call `submit_plan`, so we never parse free text.
-- **Past-time clipping** — if the LLM proposes `day_offset=0` at a time
-  already past, the parser pushes it to tomorrow.
-- **Bounded iterations** — max 3 revision rounds by default; failure surfaces
-  the full trace and adds nothing to the schedule.
-- **Structured logging** — every step (LLM request/response latency, token
-  usage, conflict counts, errors) is JSON-logged to `pawpal_agent.log` for
-  replay and the reliability writeup.
-
-See [`model_card.md`](model_card.md) for the full reliability eval.
-
-### Demo walkthrough
-
-> 📹 *Add your Loom link here once recorded.*
-
-## Getting started
-
-### Setup
+### Step-by-step
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/Iamdk25/applied-ai-system-pawpal.git
+cd applied-ai-system-pawpal
+
+# 2. Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # macOS/Linux
+# .venv\Scripts\activate          # Windows
+
+# 3. Install dependencies
 pip install -r requirements.txt
+
+# 4. Configure your API key
+cp .env.example .env
+# Edit .env and paste your GEMINI_API_KEY
+
+# 5. Run the app
+streamlit run app.py
+
+# 6. Run the test suite (no API key needed)
+python -m pytest tests/ -v
+
+# 7. (Optional) Run the live reliability eval
+python eval_agent.py
 ```
 
-### Suggested workflow
+---
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
+## 💬 Sample Interactions
 
-## Testing PawPal+
+Below are three real examples demonstrating the AI Planner generating plans from natural-language goals.
 
-### Running the test suite
+### Example 1: Senior Dog Weight Loss
+
+| | |
+|---|---|
+| **Goal** | *"Help my senior dog lose weight over the next week"* |
+| **Pet** | Rex — Dog, age 10 |
+| **Existing tasks** | 1 daily walk at 08:00 |
+| **AI Output** | 3 new tasks added in **1 iteration**: reduced-portion feedings at 07:30 and 17:30, plus an extra afternoon walk at 16:00 |
+| **Reasoning** | *"A weight loss plan for a senior dog requires controlled feeding portions and increased but gentle exercise. Two measured feedings replace free-feeding, and an additional low-intensity walk supplements the existing morning walk."* |
+| **Reviewer** | ✅ Passed — no conflicts with the existing 08:00 walk |
+
+### Example 2: Puppy Potty Training
+
+| | |
+|---|---|
+| **Goal** | *"Potty train my 3-month-old puppy"* |
+| **Pet** | Bean — Dog, age 0 |
+| **Existing tasks** | (none) |
+| **AI Output** | 11 new tasks added in **2 iterations**: frequent bathroom walks (07:00, 10:00, 13:00, 16:00, 19:00), meals (07:30, 12:00, 17:30), and a crate training session |
+| **Reasoning** | *"Young puppies need frequent outdoor trips after meals, naps, and play. A 3-hour rotation ensures consistent reinforcement."* |
+| **Reviewer** | Iteration 1 had 2 conflicts (meal and walk at same time) → Iteration 2 spaced them 30+ min apart ✅ |
+
+### Example 3: New Kitten Socialization
+
+| | |
+|---|---|
+| **Goal** | *"New kitten introduction and socialization plan"* |
+| **Pet** | Tiny — Cat, age 0 |
+| **Existing tasks** | (none) |
+| **AI Output** | 9 new tasks in **1 iteration**: daily feedings, supervised play sessions, gentle handling exercises, and a vet introductory appointment |
+| **Reasoning** | *"Socialization in the first weeks is critical for a kitten. A structured plan includes feeding times, short play and handling sessions, and an initial vet visit."* |
+| **Reviewer** | ✅ Passed — clean schedule with no conflicts |
+
+### Reasoning Trace (visible in the UI)
+
+Each plan includes an expandable **"Agent reasoning trace"** showing:
+- The LLM's stated reasoning for each iteration
+- The proposed tasks (with day, time, category)
+- Any reviewer warnings that triggered a revision
+- Latency in milliseconds per iteration
+
+---
+
+## 🧠 Design Decisions
+
+### 1. Why an agentic workflow (not just a chatbot)?
+
+A simple chatbot would generate text suggestions the user has to manually enter. The agentic approach **generates structured data** (Task objects with concrete times) that can be validated programmatically and applied with one click. This is the difference between "advice" and "automation."
+
+### 2. Why a deterministic Reviewer instead of a second LLM?
+
+The Reviewer (`Scheduler.validate_proposed_changes`) is pure Python — no API calls, no latency, no cost, and 100% deterministic. A second LLM would add non-determinism, cost, and the risk of two models agreeing on a wrong answer. The deterministic Reviewer catches every conflict reliably and produces the same human-readable warnings the user already sees in the schedule.
+
+### 3. Why function calling instead of free-text parsing?
+
+Google Gemini's `FunctionCallingConfig(mode="ANY")` forces the model to return structured JSON matching our `submit_plan` schema. This eliminates fragile regex/JSON extraction from free text and makes the output predictable and parseable.
+
+### 4. Why stage-then-confirm (human-in-the-loop)?
+
+The agent never directly modifies the pet's schedule. Plans are **staged** and displayed for review. The user sees every proposed task, the reasoning, and any reviewer feedback before clicking "Confirm & Apply." This ensures the owner always has the final say.
+
+### 5. Trade-offs
+
+| Decision | Trade-off |
+|---|---|
+| **30-min conflict window** | Catches most real conflicts but may miss 5-min clashes or flag benign 25-min gaps |
+| **Max 3 revision iterations** | Balances quality vs. API cost/latency — rarely needs more than 2 |
+| **No persistence** | Tasks live in Streamlit session state; a restart loses everything (acceptable for a demo) |
+| **Category-locked priorities** | Removes user error but prevents manual priority overrides |
+| **Single-model architecture** | Simpler than multi-agent but limited to one LLM's reasoning quality |
+
+---
+
+## 🧪 Testing Summary
+
+### Unit Tests: 16/16 ✅ (offline, no API key)
 
 ```bash
 python -m pytest tests/ -v
+# 16 passed in 0.03s
 ```
 
-The suite has **16 tests** total — 6 covering the original scheduler and 10
-covering the agent and the agent/scheduler boundary. The Gemini client is
-mocked via dependency injection (`client=` parameter on `run_planner_agent`),
-so tests run offline and deterministically.
+**Original scheduler tests** (`tests/test_pawpal.py`) — 6 tests:
+- Task completion, chronological sorting, daily recurrence, exact-time conflict detection, no false positives
 
-### What the tests cover
-
-**Original scheduler (`tests/test_pawpal.py`)** — 6 tests covering task
-completion, chronological sorting, daily recurrence, and exact-time conflict
-detection.
-
-**Agent (`tests/test_agent.py`)** — 10 tests:
+**Agent tests** (`tests/test_agent.py`) — 10 tests:
 
 | Test | What it proves |
 |---|---|
-| `test_happy_path_first_iteration_passes` | A clean round-1 plan is staged but **not yet** added to the pet (commit is the user's job). |
-| `test_commit_applies_tasks_to_pet` | `commit_agent_result` actually appends tasks to the pet. |
-| `test_conflict_triggers_revision` | Round 1 conflicts with an existing task; round 2 picks a different time and the Reviewer passes. |
-| `test_max_iterations_exceeded_commits_nothing` | All 3 rounds fail → `success=False`, no agent tasks added. |
-| `test_malformed_response_logged_then_retried` | A tool input missing required fields is caught, the iteration is logged as failed, and the next iteration succeeds. |
-| `test_empty_goal_rejected_before_api_call` | An empty goal is blocked by the guardrail with **zero** API calls made. |
-| `test_abusive_input_rejected` | Prompt-injection canaries (e.g. *"ignore previous"*) are blocked. |
-| `test_validate_finds_internal_proposed_conflicts` | Two new tasks 10 min apart are flagged. |
-| `test_validate_finds_external_conflict_with_existing` | A new task 5 min after an existing one is flagged. |
-| `test_validate_ignores_pre_existing_user_conflicts` | The agent isn't blamed for the user's own pre-existing collisions. |
+| `test_happy_path_first_iteration_passes` | Clean plan is staged but not applied until commit |
+| `test_commit_applies_tasks_to_pet` | `commit_agent_result` actually adds tasks to the pet |
+| `test_conflict_triggers_revision` | Conflict in round 1 → round 2 picks different time → passes |
+| `test_max_iterations_exceeded_commits_nothing` | 3 failed rounds → nothing applied, error surfaced |
+| `test_malformed_response_logged_then_retried` | Missing fields caught, logged, next iteration succeeds |
+| `test_empty_goal_rejected_before_api_call` | Empty goal blocked with zero API calls |
+| `test_abusive_input_rejected` | Prompt injection ("ignore previous") blocked by guardrail |
+| `test_validate_finds_internal_proposed_conflicts` | Two proposed tasks 10 min apart are flagged |
+| `test_validate_finds_external_conflict_with_existing` | Proposed task 5 min after existing one is flagged |
+| `test_validate_ignores_pre_existing_user_conflicts` | Agent not blamed for user's own pre-existing collisions |
 
-### Reliability eval
+### Live Reliability Eval: 5/6 (83%) ✅
 
-Run `python eval_agent.py` to exercise 6 representative goals against the
-live Gemini API. The script prints a markdown table of pass / fail /
-iteration counts and an aggregate pass rate. The output is reproduced in
-[`model_card.md`](model_card.md).
+```bash
+python eval_agent.py
+```
 
-### Confidence Level
+| # | Result | Iterations | New Tasks | Goal |
+|---|--------|-----------|-----------|------|
+| 1 | ✅ PASS | 1 | 3 | Help my senior dog lose weight |
+| 2 | ✅ PASS | 2 | 11 | Potty train my 3-month-old puppy |
+| 3 | ✅ PASS | 1 | 3 | Manage anxiety for my cat |
+| 4 | ❌ FAIL | 3 | 0 | Recovery routine after surgery |
+| 5 | ✅ PASS | 3 | 7 | Senior cat dental care routine |
+| 6 | ✅ PASS | 1 | 9 | New kitten socialization |
 
-★★★★★ (5 / 5)
+**What worked:** 5 of 6 goals produced conflict-free plans within 3 iterations. Function calling with `mode=ANY` was highly reliable — Gemini called `submit_plan` with valid structured input in almost every iteration.
 
-Original scheduler behaviors are fully covered, plus the new agent path is
-exercised across happy-path, conflict-revision, max-iterations,
-malformed-response, and guardrail scenarios. The Reviewer
-(`validate_proposed_changes`) has direct unit tests independent of the LLM.
+**What didn't:** Case 4 (surgery recovery) failed because Gemini kept proposing tasks that conflicted with a pre-existing daily medication at 08:00. The Reviewer flagged each collision, but the model couldn't space tasks far enough within 3 attempts. The **local fallback planner** (deterministic, no API) was applied instead.
+
+**What I learned:** The revision loop works — when the model gets concrete feedback like *"'Vitamins' (08:15 AM) and 'Heartworm Pill' (08:00 AM) are only 15 min apart"*, it usually adjusts in the next iteration. But some goals with dense existing schedules need more than 3 rounds.
+
+---
+
+## 🔍 Guardrails & Reliability
+
+| Guardrail | Implementation |
+|---|---|
+| Goal length (5–500 chars) | `_validate_goal` in `pawpal_agent.py` |
+| Banned-token denylist | Blocks "ignore previous", "system prompt", `<script>`, "drop table" |
+| Max 30 new tasks, 10 reschedules | Enforced in function declaration schema |
+| Category enum (4 values) | `feeding`, `walk`, `medication`, `appointment` — schema-enforced |
+| Frequency enum (3 values) | `once`, `daily`, `weekly` — schema-enforced |
+| Time format validation | Regex `^([01]\d|2[0-3]):[0-5]\d$` |
+| Past-time clipping | `day_offset=0` at a past time → pushed to tomorrow |
+| Bounded iterations (max 3) | Configurable via UI slider |
+| Structured logging | JSON events to `pawpal_agent.log` for replay/audit |
+| Local fallback planner | Deterministic plan when API is unavailable or quota-limited |
+
+See [`model_card.md`](model_card.md) for the full reliability eval and AI reflection.
+
+---
+
+## 💡 Reflection
+
+### What this project taught me about AI and problem-solving
+
+**AI is best as augmentation, not replacement.** The original PawPal+ already had a working algorithmic scheduler — sorting, filtering, conflict detection, recurrence. I deliberately kept all of it. The AI agent is additive: it generates plans the user *could* have entered manually, and hands them off to the existing system to be checked by the same deterministic logic. The user always has the final say.
+
+**Structure beats cleverness.** The most impactful design decision wasn't the LLM — it was forcing structured output via function calling and building a deterministic Reviewer. Free-text LLM responses would have required fragile parsing; a second LLM as Reviewer would have added cost and non-determinism. The deterministic Python function catches every conflict reliably, and its human-readable warnings double as feedback for the next LLM iteration.
+
+**Testing AI systems requires different strategies.** Traditional unit tests work for the deterministic parts (parser, guardrails, reviewer). But the LLM's behavior is non-deterministic, so I used dependency injection to mock it for offline tests and a separate live eval harness for real API testing. The two approaches complement each other: offline tests guarantee the *code* works; live evals measure how well the *system* performs.
+
+**Switching providers is easier with clean architecture.** I originally built this with the Anthropic Claude API and later switched to Google Gemini. Because the agent code was cleanly separated from the LLM call, the migration only required changing one function (`_planner_call`) and updating the response extraction. The Planner → Reviewer → Revise loop, the guardrails, the tests, and the UI all stayed the same.
+
+### AI collaboration during this project
+
+**Helpful suggestion:** AI tools caught a pre-existing test bug in `tests/test_pawpal.py` — the assertion `assert any("WARNING:" in w for w in warnings)` was checking for a substring the code never emitted. The test had been silently passing only because an earlier assertion was caught first. AI proposed updating it to match the actual format (`"exact overlap"`), which was correct.
+
+**Flawed suggestion:** AI proposed making the Reviewer a second LLM call for a stronger "two-agent" narrative. I pushed back — the existing conflict checker is deterministic, free, and testable. A second LLM would add cost, latency, and a self-fulfilling-prophecy risk where two models agree on the same wrong answer.
+
+---
+
+## 📹 Demo Walkthrough
+
+> 📹 **[Watch the full demo walkthrough on YouTube](https://youtu.be/hqP-bQ1PSgQ)**
+
+---
+
+## 📬 Submission Checklist
+
+- [x] Code pushed to GitHub (public repo)
+- [x] `README.md` with all required sections
+- [x] `model_card.md` with reflection, guardrails, eval results
+- [x] System architecture diagram in `/assets`
+- [x] Multiple meaningful commits in history
+- [x] 16/16 tests passing offline
+- [x] 5/6 live eval cases passing (83%)
+- [x] Demo video walkthrough link added above

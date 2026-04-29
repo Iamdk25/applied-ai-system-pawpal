@@ -35,9 +35,20 @@ _MAX_GOAL_LEN = 500
 _BANNED_TOKENS = (
     "ignore previous",
     "ignore all previous",
+    "disregard previous",
+    "disregard all previous",
+    "forget previous",
+    "forget your instructions",
+    "override instructions",
+    "new instructions",
+    "you are now",
+    "act as",
+    "pretend you",
     "system prompt",
+    "reveal your prompt",
     "<script",
     "drop table",
+    "jailbreak",
 )
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 

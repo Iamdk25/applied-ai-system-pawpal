@@ -241,45 +241,52 @@ else:
                 f"(after {len(result.steps)} iteration(s)). "
                 "Review below and click Confirm to add it to the schedule."
             )
+        elif result.error and result.error.startswith("invalid_goal"):
+            # ── Guardrail rejection — very visible, no trace needed ───
+            st.error(f"🛑 **Goal rejected by guardrails:** {result.error}")
+            st.info(
+                "The goal was blocked **before any API call** was made. "
+                "Please revise your goal and try again."
+            )
+            # Don't show trace or confirm — there's nothing to show
         elif result.error == "max_iterations_exceeded":
             st.warning(
                 f"Agent could not produce a conflict-free plan in "
                 f"{len(result.steps)} iteration(s). See the trace below."
             )
-        elif result.error and result.error.startswith("invalid_goal"):
-            st.error(f"Goal rejected by guardrails: {result.error}")
         else:
             st.error(f"Agent failed: {result.error}")
 
-        # ── Reasoning trace (default-expanded on failure) ─────────────
-        with st.expander("Agent reasoning trace", expanded=not result.success):
-            for step in result.steps:
-                badge = "✅ PASSED" if step.review_passed else "🔁 REVISING"
-                st.markdown(
-                    f"**Iteration {step.iteration}** — {badge} "
-                    f"({step.latency_ms} ms)"
-                )
-                if step.llm_reasoning:
-                    st.caption(f"Reasoning: {step.llm_reasoning}")
-                if step.proposed_new_tasks:
-                    st.write(f"Proposed {len(step.proposed_new_tasks)} new task(s):")
-                    for t in step.proposed_new_tasks:
-                        st.write(
-                            f"  • `{t.due_time.strftime('%a %b %d · %I:%M %p')}` "
-                            f"[{t.category}] **{t.title}** ({t.frequency})"
-                        )
-                if step.proposed_reschedules:
-                    st.write(f"Proposed {len(step.proposed_reschedules)} reschedule(s):")
-                    for old_task, new_time in step.proposed_reschedules:
-                        st.write(
-                            f"  • Move **{old_task.title}** "
-                            f"from `{old_task.due_time.strftime('%a %b %d %I:%M %p')}` "
-                            f"→ `{new_time.strftime('%a %b %d %I:%M %p')}`"
-                        )
-                if step.review_feedback:
-                    for w in step.review_feedback:
-                        st.warning(w)
-                st.divider()
+        # ── Reasoning trace (only when there are steps to show) ───────
+        if result.steps:
+            with st.expander("Agent reasoning trace", expanded=not result.success):
+                for step in result.steps:
+                    badge = "✅ PASSED" if step.review_passed else "🔁 REVISING"
+                    st.markdown(
+                        f"**Iteration {step.iteration}** — {badge} "
+                        f"({step.latency_ms} ms)"
+                    )
+                    if step.llm_reasoning:
+                        st.caption(f"Reasoning: {step.llm_reasoning}")
+                    if step.proposed_new_tasks:
+                        st.write(f"Proposed {len(step.proposed_new_tasks)} new task(s):")
+                        for t in step.proposed_new_tasks:
+                            st.write(
+                                f"  • `{t.due_time.strftime('%a %b %d · %I:%M %p')}` "
+                                f"[{t.category}] **{t.title}** ({t.frequency})"
+                            )
+                    if step.proposed_reschedules:
+                        st.write(f"Proposed {len(step.proposed_reschedules)} reschedule(s):")
+                        for old_task, new_time in step.proposed_reschedules:
+                            st.write(
+                                f"  • Move **{old_task.title}** "
+                                f"from `{old_task.due_time.strftime('%a %b %d %I:%M %p')}` "
+                                f"→ `{new_time.strftime('%a %b %d %I:%M %p')}`"
+                            )
+                    if step.review_feedback:
+                        for w in step.review_feedback:
+                            st.warning(w)
+                    st.divider()
 
         # ── Confirmation panel (only on success) ──────────────────────
         if result.success and result.requires_confirmation:

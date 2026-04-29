@@ -1,23 +1,60 @@
 flowchart TB
-    User[User] -->|goal + pet selection| UI[Streamlit app.py]
-    UI -->|run_planner_agent| Agent[pawpal_agent.py]
+    %% --- Node Definitions with Semantic Shapes ---
+    User((User))
+    UI([Streamlit UI<br/>app.py])
+    Agent[Agent Orchestrator<br/>pawpal_agent.py]
+    
+    Stage[/Stage AgentResult<br/>requires_confirmation=True/]
+    Commit[(Commit Changes<br/>pet.add_task & update_time)]
+    
+    Logger[(Agent Log<br/>pawpal_agent.log)]
+    Existing[(Pending Tasks<br/>Scheduler)]
 
-    subgraph Loop ["Revision loop (max N=3)"]
-      direction TB
-      Agent -->|prompt + existing tasks + prior feedback| Planner["Planner LLM call<br/>Claude Sonnet 4.6<br/>tool_use: submit_plan"]
-      Planner -->|JSON: new_tasks + reschedules| Parser["parse + guardrails"]
-      Parser -->|List Task + reschedule tuples| Reviewer["Reviewer<br/>Scheduler.validate_proposed_changes<br/>30-min window"]
-      Reviewer -->|warnings| Agent
+    %% --- Subgraphs for Logical Grouping ---
+    subgraph Frontend [User Interface]
+        direction TB
+        User
+        UI
     end
 
-    Reviewer -->|empty warnings| Stage["Stage AgentResult<br/>requires_confirmation=True"]
-    Stage --> UI
-    UI -->|user clicks Confirm & Apply| Commit["commit_agent_result:<br/>pet.add_task + task.update_time"]
-    Agent -->|JSON events| Logger["agent_logging.py<br/>pawpal_agent.log"]
+    subgraph RevisionLoop [Cognitive Revision Loop max N=3]
+        direction TB
+        Planner[[Planner LLM<br/>Claude Sonnet 4.6<br/>tool_use: submit_plan]]
+        Parser>JSON Parser<br/>& Guardrails]
+        Reviewer{{Reviewer Validation<br/>30-min window}}
+    end
 
-    Existing["Scheduler<br/>existing pending tasks"] --> Reviewer
+    %% --- Main Control Flow ---
+    User -->|Goal & Pet Selection| UI
+    UI -->|run_planner_agent| Agent
+    
+    Agent -->|Prompt, existing tasks<br/>& prior feedback| Planner
+    Planner -->|JSON: new_tasks<br/>+ reschedules| Parser
+    Parser -->|Task list &<br/>reschedule tuples| Reviewer
+    
+    %% Loop Logic
+    Reviewer -->|Warnings| Agent
+    Reviewer ==>|Empty Warnings| Stage
+    
+    %% Return to UI & Commit
+    Stage -->|Display to User| UI
+    UI ==>|User Clicks<br/>Confirm & Apply| Commit
 
-    style Planner fill:#e8f0fe,stroke:#1a73e8
-    style Reviewer fill:#fef7e0,stroke:#f9ab00
-    style Commit fill:#e6f4ea,stroke:#1e8e3e
-    style Stage fill:#f3e5f5,stroke:#8e24aa
+    %% --- Background Data & Logging Flow (Dashed) ---
+    Existing -.->|Read existing state| Reviewer
+    Agent -.->|Log JSON events| Logger
+
+    %% --- Styling Classes ---
+    classDef llm fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000
+    classDef validator fill:#fef7e0,stroke:#f9ab00,stroke-width:2px,color:#000
+    classDef success fill:#e6f4ea,stroke:#1e8e3e,stroke-width:2px,color:#000
+    classDef stage fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
+    classDef storage fill:#eceff1,stroke:#607d8b,stroke-width:2px,color:#000
+    classDef default stroke-width:1.5px
+
+    %% Apply Styles
+    class Planner llm;
+    class Reviewer validator;
+    class Commit success;
+    class Stage stage;
+    class Logger,Existing storage;
