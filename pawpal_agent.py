@@ -421,14 +421,23 @@ def _default_client() -> Any:
     gem_key = os.getenv("GEMINI_API_KEY")
     if gem_key:
         try:
-            import google.generativeai as genai  # type: ignore
+            # Prefer the newer package name if available
+            try:
+                import google.genai as genai  # type: ignore
+            except Exception:
+                import google.generativeai as genai  # type: ignore
         except Exception as exc:  # pragma: no cover - runtime environment dependent
             raise RuntimeError(f"gemini_client_import_failed: {exc}")
         # configure the library (some SDK versions use configure)
         try:
-            genai.configure(api_key=gem_key)  # type: ignore
+            # both SDKs may accept configure or require setting an env var
+            if hasattr(genai, 'configure'):
+                genai.configure(api_key=gem_key)  # type: ignore
+            else:
+                import os as _os
+                _os.environ['GEMINI_API_KEY'] = gem_key
         except Exception:
-            # older/newer SDKs may differ; ignore if not supported
+            # ignore if not supported
             pass
 
         # Build a lightweight adapter that exposes .messages.create(...) and
@@ -452,51 +461,79 @@ def _default_client() -> Any:
 
                         prompt = f"{system}\n\n{user_text}" if system else user_text
 
-                        # Try chat completion API first (common naming):
                         text_content = None
-                        try:
-                            # Some SDKs provide genai.chat.completions.create
-                            chat = getattr(self._outer._genai, "chat", None)
-                            if chat is not None and hasattr(chat, "completions"):
-                                resp = chat.completions.create(model=model, messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}], temperature=0.0, max_output_tokens=max_tokens)
-                                # Extract textual content from a few possible shapes
-                                if hasattr(resp, "candidates") and resp.candidates:
-                                    cand = resp.candidates[0]
-                                    text_content = getattr(cand, "content", None) or cand.get("content") if isinstance(cand, dict) else str(cand)
-                                else:
-                                    # fallback
-                                    text_content = getattr(resp, "content", None) or str(resp)
+                        resp = None
 
+                        # 1) Newer google.genai / google.generativeai: GenerativeModel + chat
+                        try:
+                            GenModel = getattr(self._outer._genai, 'GenerativeModel', None)
+                            if GenModel is not None:
+                                model_obj = GenModel(model)
+                                # start a chat session and send a single message
+                                if hasattr(model_obj, 'start_chat'):
+                                    chat = model_obj.start_chat()
+                                    resp = chat.send_message(prompt)
+                                    text_content = getattr(resp, 'text', None) or (resp.candidates[0].content if getattr(resp, 'candidates', None) else None) or None
                         except Exception:
                             text_content = None
 
+                        # 2) Older helpers: genai.generate(model=..., prompt=...)
                         if text_content is None:
-                            # Try a more generic generate entrypoint
                             try:
-                                gen = getattr(self._outer._genai, "generate", None)
+                                gen = getattr(self._outer._genai, 'generate', None)
                                 if gen is not None:
-                                    # Some SDK variants expose generate(model=..., prompt=...)
                                     resp = gen(model=model, prompt=prompt, max_output_tokens=max_tokens)
-                                    text_content = getattr(resp, "text", None) or str(resp)
-                            except Exception as exc:
-                                raise RuntimeError(f"gemini_api_call_failed: {exc}")
+                                    text_content = getattr(resp, 'text', None) or getattr(resp, 'output', None) or str(resp)
+                            except Exception:
+                                text_content = None
+
+                        # 3) ChatSession convenience API: ChatSession(model=...) -> send_message
+                        if text_content is None:
+                            try:
+                                ChatSession = getattr(self._outer._genai, 'ChatSession', None)
+                                if ChatSession is not None:
+                                    # ChatSession requires a model object or name depending on SDK
+                                    try:
+                                        # prefer passing a model object
+                                        model_obj = getattr(self._outer._genai, 'GenerativeModel', None)
+                                        if model_obj is not None:
+                                            session = self._outer._genai.ChatSession(model_obj(model))
+                                        else:
+                                            session = self._outer._genai.ChatSession(model)
+                                        resp = session.send_message(prompt)
+                                        text_content = getattr(resp, 'text', None) or (resp.candidates[0].content if getattr(resp, 'candidates', None) else None) or None
+                                    except Exception:
+                                        # fallback: try instantiating with string model
+                                        session = self._outer._genai.ChatSession(model)
+                                        resp = session.send_message(prompt)
+                                        text_content = getattr(resp, 'text', None) or (resp.candidates[0].content if getattr(resp, 'candidates', None) else None) or None
+                            except Exception:
+                                text_content = None
+
+                        # 4) Fallback: stringify whatever we got
+                        if text_content is None and resp is not None:
+                            try:
+                                text_content = str(resp)
+                            except Exception:
+                                text_content = None
 
                         if not text_content:
-                            raise RuntimeError("gemini_no_text_response")
+                            try:
+                                raw_repr = repr(resp)
+                            except Exception:
+                                raw_repr = '<unrepresentable response>'
+                            raise RuntimeError(f"gemini_no_text_response: raw_response={raw_repr[:1000]!r}")
 
-                        # Try to find a JSON object in the model output and use it
-                        # as the tool input. This keeps the rest of the planner
-                        # logic (which expects an Anthropic `tool_use` block) unchanged.
+                        # Extract JSON object
                         import json, re
-                        m = re.search(r"\{.*\}", text_content, re.S)
+                        m = re.search(r"\{(?:[^{}]|(?R))*\}", text_content, re.S) or re.search(r"\{.*\}", text_content, re.S)
                         if not m:
-                            raise RuntimeError("gemini_no_json_in_response")
+                            raise RuntimeError(f"gemini_no_json_in_response: {text_content[:320]!r}")
                         try:
                             payload = json.loads(m.group(0))
                         except Exception as exc:
-                            raise RuntimeError(f"gemini_json_parse_failed: {exc}")
+                            raise RuntimeError(f"gemini_json_parse_failed: {exc}: snippet={m.group(0)[:200]!r}")
 
-                        # Build a minimal compatible response object
                         from types import SimpleNamespace
                         tool_block = SimpleNamespace(type="tool_use", name="submit_plan", input=payload)
                         return SimpleNamespace(stop_reason="tool_use", content=[tool_block], usage=None)
@@ -547,6 +584,7 @@ def run_planner_agent(
     if client is None:
         try:
             client = _default_client()
+            client_is_gemini = os.getenv("GEMINI_API_KEY") is not None
         except Exception as exc:  # noqa: BLE001
             err = f"client_init_failed: {exc}"
             log_event("agent.api_error", level="ERROR", error=err)
@@ -573,13 +611,49 @@ def run_planner_agent(
                 iteration=iteration,
             )
         except Exception as exc:  # noqa: BLE001
-            err = f"api_error: {exc}"
-            log_event("agent.api_error", level="ERROR",
-                      iteration=iteration, error=err)
-            return AgentResult(
-                success=False, steps=steps, goal=goal, pet_name=pet.name,
-                error=err, requires_confirmation=False,
-            )
+            # If Gemini returned an unparseable response, attempt an Anthropic
+            # fallback (only when a GEMINI_API_KEY was used). This improves
+            # reliability while we debug provider differences.
+            last_exc_str = str(exc)
+            log_event("agent.api_error", level="WARNING",
+                      attempt=1, error=last_exc_str)
+            if 'gemini_no_text_response' in last_exc_str and os.getenv("GEMINI_API_KEY"):
+                try:
+                    # Verify Anthropic API key exists before attempting fallback
+                    if not os.getenv("ANTHROPIC_API_KEY"):
+                        raise RuntimeError(
+                            "anthropic_api_key_missing: set ANTHROPIC_API_KEY to enable fallback"
+                        )
+                    import anthropic as _ant  # type: ignore
+                    # Some Anthropic SDKs accept an api_key param; try to use it.
+                    try:
+                        anth_client = _ant.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                    except Exception:
+                        anth_client = _ant.Anthropic()
+                    log_event("agent.fallback", provider="anthropic",
+                              reason="gemini_no_text_response")
+                    response = _planner_call(
+                        client=anth_client, model=model, goal=goal, pet=pet,
+                        existing_summary=existing_summary,
+                        prior_feedback=prior_feedback,
+                        iteration=iteration,
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    err = f"api_error: {exc2}"
+                    log_event("agent.api_error", level="ERROR",
+                              iteration=iteration, error=err)
+                    return AgentResult(
+                        success=False, steps=steps, goal=goal, pet_name=pet.name,
+                        error=err, requires_confirmation=False,
+                    )
+            else:
+                err = f"api_error: {exc}"
+                log_event("agent.api_error", level="ERROR",
+                          iteration=iteration, error=err)
+                return AgentResult(
+                    success=False, steps=steps, goal=goal, pet_name=pet.name,
+                    error=err, requires_confirmation=False,
+                )
         latency_ms = int((time.monotonic() - t0) * 1000)
         usage = getattr(response, "usage", None)
         log_event(
