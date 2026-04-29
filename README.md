@@ -6,7 +6,7 @@
 > filtering, conflict detection, recurrence) to organize daily care tasks. The
 > original system required users to enter every task by hand. **This version
 > adds an agentic Planner** that turns a one-line care goal into a
-> conflict-free, multi-day schedule using Claude.
+> conflict-free, multi-day schedule using Google Gemini.
 
 ## Scenario
 
@@ -101,10 +101,10 @@ The **Planner Agent** turns a high-level pet care goal (e.g. *"Help my senior
 dog lose weight"*) into a 7-day, conflict-free schedule. It runs an agentic
 **Planner → Reviewer → Revise** loop:
 
-1. **Planner** — The agent drafts a multi-day plan. If `GEMINI_API_KEY` is set
-   the app will prefer Google Gemini; otherwise it falls back to Anthropic.
-   The planner logic expects the model to return a structured plan (JSON) and
-   the code adapts SDK responses into a common `tool_use`-like shape.
+1. **Planner** — The agent drafts a multi-day plan using Google Gemini
+   (`gemini-2.5-flash` by default) with function calling. The model returns
+   structured JSON via a `submit_plan` function declaration, enforced by
+   `FunctionCallingConfig(mode="ANY")`.
 2. **Reviewer** — `Scheduler.validate_proposed_changes` (deterministic
    Python) checks the proposed plan against the user's existing schedule for
    30-minute conflicts. Pre-existing user collisions are ignored — only pairs
@@ -124,14 +124,14 @@ dog lose weight"*) into a 7-day, conflict-free schedule. It runs an agentic
 
 ### Setup
 
-Copy `.env.example` to `.env` and fill in your `GEMINI_API_KEY` (preferred) or `ANTHROPIC_API_KEY` as a fallback:
+Copy `.env.example` to `.env` and fill in your `GEMINI_API_KEY`:
 
 ```bash
 cp .env.example .env
 # then edit .env and paste your key
 ```
 
-Override the default model with `PAWPAL_AGENT_MODEL` (e.g. `claude-opus-4-7`).
+Override the default model with `PAWPAL_AGENT_MODEL` (e.g. `gemini-2.5-pro`).
 
 ### Sample interactions
 
@@ -149,8 +149,8 @@ LLM's stated reasoning, and any reviewer warnings that triggered a revision.
 - **Goal validation** — empty goals, goals shorter than 5 chars, longer than
   500 chars, or containing a banned token (e.g. *"ignore previous"*) are
   rejected before any LLM call. The agent surfaces `error="invalid_goal: ..."`.
-- **Schema-forced output** — `tool_choice` makes Claude always call
-  `submit_plan`, so we never parse free text.
+- **Schema-forced output** — `FunctionCallingConfig(mode="ANY")` makes Gemini
+  always call `submit_plan`, so we never parse free text.
 - **Past-time clipping** — if the LLM proposes `day_offset=0` at a time
   already past, the parser pushes it to tomorrow.
 - **Bounded iterations** — max 3 revision rounds by default; failure surfaces
@@ -194,7 +194,7 @@ python -m pytest tests/ -v
 ```
 
 The suite has **16 tests** total — 6 covering the original scheduler and 10
-covering the agent and the agent/scheduler boundary. The Anthropic client is
+covering the agent and the agent/scheduler boundary. The Gemini client is
 mocked via dependency injection (`client=` parameter on `run_planner_agent`),
 so tests run offline and deterministically.
 
@@ -222,7 +222,7 @@ detection.
 ### Reliability eval
 
 Run `python eval_agent.py` to exercise 6 representative goals against the
-live Anthropic API. The script prints a markdown table of pass / fail /
+live Gemini API. The script prints a markdown table of pass / fail /
 iteration counts and an aggregate pass rate. The output is reproduced in
 [`model_card.md`](model_card.md).
 

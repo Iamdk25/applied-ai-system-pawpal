@@ -1,7 +1,7 @@
 """Reliability eval for the PawPal+ Planner Agent.
 
 Runs a fixed battery of (goal, pet, preloaded tasks) cases against the live
-Anthropic API and reports pass/fail stats. Output is intended for the
+Gemini API and reports pass/fail stats. Output is intended for the
 project's reliability writeup (model_card.md).
 
 Usage:

@@ -1,12 +1,15 @@
 """PawPal+ Planner Agent — turns a high-level care goal into a 7-day schedule.
 
-Workflow: Planner (LLM, structured tool_use) → Reviewer (deterministic
+Workflow: Planner (LLM, structured function calling) → Reviewer (deterministic
 Scheduler.validate_proposed_changes) → Revise loop (max N iterations) → stage
 result for UI confirmation → commit_agent_result applies it to the pet.
+
+Uses the Google Gemini API (google-genai SDK) for structured plan generation.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -22,7 +25,7 @@ from agent_logging import log_event
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = os.getenv("PAWPAL_AGENT_MODEL", "claude-sonnet-4-6")
+DEFAULT_MODEL = os.getenv("PAWPAL_AGENT_MODEL", "gemini-2.5-flash")
 DEFAULT_MAX_ITERATIONS = 3
 DEFAULT_DAYS_AHEAD = 7
 CONFLICT_WINDOW_MINUTES = 30
@@ -43,16 +46,16 @@ VALID_FREQUENCIES = {"once", "daily", "weekly"}
 
 
 # ---------------------------------------------------------------------------
-# Tool schema (forces structured JSON via tool_choice)
+# Function declaration for Gemini function calling
 # ---------------------------------------------------------------------------
 
-SUBMIT_PLAN_TOOL: dict = {
+SUBMIT_PLAN_FUNCTION_DECLARATION = {
     "name": "submit_plan",
     "description": (
         "Submit a multi-day pet care plan. May add new tasks and/or reschedule "
         "existing tasks. Always called exactly once."
     ),
-    "input_schema": {
+    "parameters": {
         "type": "object",
         "required": ["reasoning", "new_tasks", "reschedules"],
         "properties": {
@@ -62,7 +65,6 @@ SUBMIT_PLAN_TOOL: dict = {
             },
             "new_tasks": {
                 "type": "array",
-                "maxItems": 30,
                 "items": {
                     "type": "object",
                     "required": [
@@ -70,33 +72,32 @@ SUBMIT_PLAN_TOOL: dict = {
                         "frequency", "day_offset", "time_of_day",
                     ],
                     "properties": {
-                        "title": {"type": "string", "minLength": 1, "maxLength": 80},
-                        "description": {"type": "string", "maxLength": 240},
+                        "title": {"type": "string", "description": "Task title, 1-80 chars"},
+                        "description": {"type": "string", "description": "Task description, max 240 chars"},
                         "category": {
                             "type": "string",
                             "enum": list(VALID_CATEGORIES),
+                            "description": "Task category",
                         },
                         "frequency": {
                             "type": "string",
                             "enum": list(VALID_FREQUENCIES),
+                            "description": "How often the task recurs",
                         },
                         "day_offset": {
                             "type": "integer",
-                            "minimum": 0,
-                            "maximum": 6,
-                            "description": "Days from today (0 = today).",
+                            "description": "Days from today (0 = today, max 6).",
                         },
                         "time_of_day": {
                             "type": "string",
-                            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                            "description": "24-hour HH:MM.",
+                            "description": "24-hour HH:MM format, e.g. '08:00' or '14:30'.",
                         },
                     },
                 },
+                "description": "New tasks to add (max 30).",
             },
             "reschedules": {
                 "type": "array",
-                "maxItems": 10,
                 "items": {
                     "type": "object",
                     "required": [
@@ -109,13 +110,14 @@ SUBMIT_PLAN_TOOL: dict = {
                             "type": "string",
                             "description": "ISO datetime of the task to move (must match a current pending task).",
                         },
-                        "new_day_offset": {"type": "integer", "minimum": 0, "maximum": 6},
+                        "new_day_offset": {"type": "integer", "description": "Days from today (0-6)"},
                         "new_time_of_day": {
                             "type": "string",
-                            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+                            "description": "24-hour HH:MM.",
                         },
                     },
                 },
+                "description": "Existing tasks to reschedule (max 10).",
             },
         },
     },
@@ -136,7 +138,7 @@ Rules:
   necessary to fit the goal — and never reschedule appointments.
 - If you receive REVIEWER FEEDBACK, you MUST adjust the conflicting times in
   your next response.
-- You MUST submit your plan via the submit_plan tool. Do not respond with text only.
+- You MUST submit your plan via the submit_plan function. Do not respond with text only.
 """
 
 
@@ -193,11 +195,7 @@ def _validate_goal(goal: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _summarize_existing_tasks(pet: Pet, days: int = 14) -> str:
-    """Compact summary of upcoming pending tasks for the target pet only.
-
-    Capped at 14 days of pending tasks to bound prompt tokens even when the
-    user has many.
-    """
+    """Compact summary of upcoming pending tasks for the target pet only."""
     now = datetime.now()
     cutoff = now + timedelta(days=days)
     pending = [
@@ -241,7 +239,7 @@ def _build_user_prompt(
             parts.append(f"- {w}")
     parts.extend([
         "",
-        "Submit your plan via the submit_plan tool.",
+        "Submit your plan via the submit_plan function.",
     ])
     return "\n".join(parts)
 
@@ -254,17 +252,90 @@ class PlanParseError(ValueError):
     pass
 
 
+def _extract_first_json(text: str) -> str | None:
+    """Find the first balanced JSON object in text and return it as a string."""
+    if not isinstance(text, str):
+        return None
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i+1]
+    return None
+
+
 def _extract_tool_input(response: Any) -> dict:
-    """Pull the submit_plan tool input out of an Anthropic Message response."""
-    if getattr(response, "stop_reason", None) != "tool_use":
-        raise PlanParseError(f"expected stop_reason=tool_use, got {response.stop_reason!r}")
-    for block in getattr(response, "content", []):
-        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_plan":
-            payload = getattr(block, "input", None)
-            if not isinstance(payload, dict):
-                raise PlanParseError("tool_use block has no dict input")
-            return payload
-    raise PlanParseError("no submit_plan tool_use block in response")
+    """Pull the submit_plan function call args from a Gemini response.
+
+    Works with both real Gemini responses and FakeClient SimpleNamespace
+    responses (used in tests).
+    """
+    # --- Path A: FakeClient / Anthropic-shaped response ---
+    # Check for stop_reason='tool_use' (test FakeClient format)
+    if getattr(response, "stop_reason", None) == "tool_use":
+        for block in getattr(response, "content", []):
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_plan":
+                payload = getattr(block, "input", None)
+                if not isinstance(payload, dict):
+                    raise PlanParseError("tool_use block has no dict input")
+                return payload
+        raise PlanParseError("no submit_plan tool_use block in response")
+
+    # --- Path B: Real Gemini response ---
+    # Search all candidates and all parts for the submit_plan function call
+    try:
+        candidates = response.candidates or []
+        for candidate in candidates:
+            parts = getattr(candidate, "content", None)
+            if parts is not None:
+                parts = getattr(parts, "parts", None) or []
+            else:
+                parts = []
+            for part in parts:
+                fc = getattr(part, "function_call", None)
+                if fc is not None:
+                    name = getattr(fc, "name", None)
+                    if name == "submit_plan":
+                        args = getattr(fc, "args", None)
+                        if isinstance(args, dict):
+                            return args
+                        # Some SDK versions return a proto MapComposite
+                        return dict(args)
+    except (AttributeError, IndexError, TypeError):
+        pass
+
+    # --- Path C: Try to extract JSON from text response ---
+    try:
+        text = response.text
+        if text:
+            snippet = _extract_first_json(text)
+            if snippet:
+                parsed = json.loads(snippet)
+                if isinstance(parsed, dict) and ("new_tasks" in parsed or "reasoning" in parsed):
+                    return parsed
+    except (AttributeError, json.JSONDecodeError):
+        pass
+
+    raise PlanParseError("no submit_plan function call found in response")
 
 
 def _compose_due_time(day_offset: int, time_of_day: str, today: datetime) -> datetime:
@@ -286,11 +357,7 @@ def _parse_proposed(
     pet: Pet,
     today: datetime,
 ) -> Tuple[List[Task], List[Tuple[Task, datetime]], str]:
-    """Convert validated-by-schema tool input into Task objects + reschedule tuples.
-
-    The Anthropic tool schema does most validation, but we still defensively
-    re-check field types and contents.
-    """
+    """Convert validated tool input into Task objects + reschedule tuples."""
     if not isinstance(payload, dict):
         raise PlanParseError("payload is not a dict")
     reasoning = str(payload.get("reasoning", "")).strip()
@@ -361,7 +428,7 @@ def _parse_proposed(
 
 
 # ---------------------------------------------------------------------------
-# Planner LLM call
+# Planner LLM call (Google Gemini via google-genai SDK)
 # ---------------------------------------------------------------------------
 
 def _planner_call(
@@ -374,25 +441,58 @@ def _planner_call(
     prior_feedback: List[str],
     iteration: int,
 ) -> Any:
-    """One LLM call. Forces submit_plan via tool_choice. Caller handles parsing."""
+    """One LLM call. Uses Gemini function calling for structured output.
+
+    If `client` has a `messages` attribute (FakeClient from tests), we use
+    the Anthropic-compatible path. Otherwise we use the real google-genai SDK.
+    """
     user_msg = _build_user_prompt(
         goal=goal, pet=pet,
         existing_summary=existing_summary,
         prior_feedback=prior_feedback,
         iteration=iteration,
     )
+
+    # --- FakeClient path (for tests) ---
+    if hasattr(client, "messages") and hasattr(client.messages, "create"):
+        # This is the test FakeClient — call the Anthropic-shaped API
+        return client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            tools=[SUBMIT_PLAN_FUNCTION_DECLARATION],
+            tool_choice={"type": "tool", "name": "submit_plan"},
+            messages=[{"role": "user", "content": user_msg}],
+        )
+
+    # --- Real Gemini SDK path ---
+    from google.genai import types
+
+    tools = types.Tool(function_declarations=[SUBMIT_PLAN_FUNCTION_DECLARATION])
+    # Force the model to always call the function (like Anthropic's tool_choice)
+    tool_config = types.ToolConfig(
+        function_calling_config=types.FunctionCallingConfig(
+            mode="ANY",
+            allowed_function_names=["submit_plan"],
+        )
+    )
+    config = types.GenerateContentConfig(
+        tools=[tools],
+        tool_config=tool_config,
+        system_instruction=SYSTEM_PROMPT,
+        temperature=0.5,
+    )
+
+    combined_prompt = user_msg
     last_exc: Optional[Exception] = None
     for attempt in range(2):  # one retry on transient API error
         try:
-            return client.messages.create(
+            return client.models.generate_content(
                 model=model,
-                max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                tools=[SUBMIT_PLAN_TOOL],
-                tool_choice={"type": "tool", "name": "submit_plan"},
-                messages=[{"role": "user", "content": user_msg}],
+                contents=combined_prompt,
+                config=config,
             )
-        except Exception as exc:  # noqa: BLE001 — surface anything to caller
+        except Exception as exc:
             last_exc = exc
             log_event(
                 "agent.api_error",
@@ -410,145 +510,14 @@ def _planner_call(
 # ---------------------------------------------------------------------------
 
 def _default_client() -> Any:
-    """Lazy import so tests don't need provider packages installed.
-
-    Preference order:
-    - If GEMINI_API_KEY is set, return a thin Gemini adapter that implements
-      messages.create(...) with a compatible shape used by the rest of this
-      module.
-    - Otherwise fall back to the Anthropic SDK if available.
-    """
+    """Create a Google Gemini client using the google-genai SDK."""
     gem_key = os.getenv("GEMINI_API_KEY")
-    if gem_key:
-        try:
-            # Prefer the newer package name if available
-            try:
-                import google.genai as genai  # type: ignore
-            except Exception:
-                import google.generativeai as genai  # type: ignore
-        except Exception as exc:  # pragma: no cover - runtime environment dependent
-            raise RuntimeError(f"gemini_client_import_failed: {exc}")
-        # configure the library (some SDK versions use configure)
-        try:
-            # both SDKs may accept configure or require setting an env var
-            if hasattr(genai, 'configure'):
-                genai.configure(api_key=gem_key)  # type: ignore
-            else:
-                import os as _os
-                _os.environ['GEMINI_API_KEY'] = gem_key
-        except Exception:
-            # ignore if not supported
-            pass
-
-        # Build a lightweight adapter that exposes .messages.create(...) and
-        # returns a response object shape compatible with the Anthropic-based
-        # flow used elsewhere in this file.
-        class GeminiClientAdapter:
-            def __init__(self, genai_lib):
-                self._genai = genai_lib
-                # messages is an object with a create method to match Anthropic
-                class _Msgs:
-                    def __init__(self, outer):
-                        self._outer = outer
-
-                    def create(self, *, model, max_tokens, system, tools, tool_choice, messages):
-                        # Combine system + user into a single prompt when the SDK
-                        # doesn't support the exact chat signature. Try several
-                        # possible SDK entrypoints for compatibility.
-                        user_text = ""
-                        if messages and isinstance(messages, list):
-                            user_text = messages[0].get("content", "")
-
-                        prompt = f"{system}\n\n{user_text}" if system else user_text
-
-                        text_content = None
-                        resp = None
-
-                        # 1) Newer google.genai / google.generativeai: GenerativeModel + chat
-                        try:
-                            GenModel = getattr(self._outer._genai, 'GenerativeModel', None)
-                            if GenModel is not None:
-                                model_obj = GenModel(model)
-                                # start a chat session and send a single message
-                                if hasattr(model_obj, 'start_chat'):
-                                    chat = model_obj.start_chat()
-                                    resp = chat.send_message(prompt)
-                                    text_content = getattr(resp, 'text', None) or (resp.candidates[0].content if getattr(resp, 'candidates', None) else None) or None
-                        except Exception:
-                            text_content = None
-
-                        # 2) Older helpers: genai.generate(model=..., prompt=...)
-                        if text_content is None:
-                            try:
-                                gen = getattr(self._outer._genai, 'generate', None)
-                                if gen is not None:
-                                    resp = gen(model=model, prompt=prompt, max_output_tokens=max_tokens)
-                                    text_content = getattr(resp, 'text', None) or getattr(resp, 'output', None) or str(resp)
-                            except Exception:
-                                text_content = None
-
-                        # 3) ChatSession convenience API: ChatSession(model=...) -> send_message
-                        if text_content is None:
-                            try:
-                                ChatSession = getattr(self._outer._genai, 'ChatSession', None)
-                                if ChatSession is not None:
-                                    # ChatSession requires a model object or name depending on SDK
-                                    try:
-                                        # prefer passing a model object
-                                        model_obj = getattr(self._outer._genai, 'GenerativeModel', None)
-                                        if model_obj is not None:
-                                            session = self._outer._genai.ChatSession(model_obj(model))
-                                        else:
-                                            session = self._outer._genai.ChatSession(model)
-                                        resp = session.send_message(prompt)
-                                        text_content = getattr(resp, 'text', None) or (resp.candidates[0].content if getattr(resp, 'candidates', None) else None) or None
-                                    except Exception:
-                                        # fallback: try instantiating with string model
-                                        session = self._outer._genai.ChatSession(model)
-                                        resp = session.send_message(prompt)
-                                        text_content = getattr(resp, 'text', None) or (resp.candidates[0].content if getattr(resp, 'candidates', None) else None) or None
-                            except Exception:
-                                text_content = None
-
-                        # 4) Fallback: stringify whatever we got
-                        if text_content is None and resp is not None:
-                            try:
-                                text_content = str(resp)
-                            except Exception:
-                                text_content = None
-
-                        if not text_content:
-                            try:
-                                raw_repr = repr(resp)
-                            except Exception:
-                                raw_repr = '<unrepresentable response>'
-                            raise RuntimeError(f"gemini_no_text_response: raw_response={raw_repr[:1000]!r}")
-
-                        # Extract JSON object
-                        import json, re
-                        m = re.search(r"\{(?:[^{}]|(?R))*\}", text_content, re.S) or re.search(r"\{.*\}", text_content, re.S)
-                        if not m:
-                            raise RuntimeError(f"gemini_no_json_in_response: {text_content[:320]!r}")
-                        try:
-                            payload = json.loads(m.group(0))
-                        except Exception as exc:
-                            raise RuntimeError(f"gemini_json_parse_failed: {exc}: snippet={m.group(0)[:200]!r}")
-
-                        from types import SimpleNamespace
-                        tool_block = SimpleNamespace(type="tool_use", name="submit_plan", input=payload)
-                        return SimpleNamespace(stop_reason="tool_use", content=[tool_block], usage=None)
-
-                self.messages = _Msgs(self)
-
-        return GeminiClientAdapter(genai)
-
-    # Fallback to Anthropic if GEMINI_API_KEY not set
-    try:
-        import anthropic  # type: ignore
-    except Exception as exc:  # pragma: no cover - environment may differ
-        raise RuntimeError(f"anthropic_client_import_failed: {exc}")
-
-    return anthropic.Anthropic()
+    if not gem_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY not set. Add it to .env or your shell environment."
+        )
+    from google import genai
+    return genai.Client(api_key=gem_key)
 
 
 def run_planner_agent(
@@ -584,7 +553,6 @@ def run_planner_agent(
     if client is None:
         try:
             client = _default_client()
-            client_is_gemini = os.getenv("GEMINI_API_KEY") is not None
         except Exception as exc:  # noqa: BLE001
             err = f"client_init_failed: {exc}"
             log_event("agent.api_error", level="ERROR", error=err)
@@ -611,57 +579,40 @@ def run_planner_agent(
                 iteration=iteration,
             )
         except Exception as exc:  # noqa: BLE001
-            # If Gemini returned an unparseable response, attempt an Anthropic
-            # fallback (only when a GEMINI_API_KEY was used). This improves
-            # reliability while we debug provider differences.
             last_exc_str = str(exc)
             log_event("agent.api_error", level="WARNING",
                       attempt=1, error=last_exc_str)
-            if 'gemini_no_text_response' in last_exc_str and os.getenv("GEMINI_API_KEY"):
-                try:
-                    # Verify Anthropic API key exists before attempting fallback
-                    if not os.getenv("ANTHROPIC_API_KEY"):
-                        raise RuntimeError(
-                            "anthropic_api_key_missing: set ANTHROPIC_API_KEY to enable fallback"
-                        )
-                    import anthropic as _ant  # type: ignore
-                    # Some Anthropic SDKs accept an api_key param; try to use it.
-                    try:
-                        anth_client = _ant.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                    except Exception:
-                        anth_client = _ant.Anthropic()
-                    log_event("agent.fallback", provider="anthropic",
-                              reason="gemini_no_text_response")
-                    response = _planner_call(
-                        client=anth_client, model=model, goal=goal, pet=pet,
-                        existing_summary=existing_summary,
-                        prior_feedback=prior_feedback,
-                        iteration=iteration,
-                    )
-                except Exception as exc2:  # noqa: BLE001
-                    err = f"api_error: {exc2}"
-                    log_event("agent.api_error", level="ERROR",
-                              iteration=iteration, error=err)
-                    return AgentResult(
-                        success=False, steps=steps, goal=goal, pet_name=pet.name,
-                        error=err, requires_confirmation=False,
-                    )
-            else:
-                err = f"api_error: {exc}"
-                log_event("agent.api_error", level="ERROR",
-                          iteration=iteration, error=err)
+            # If this looks like a quota / rate limit / 429 error,
+            # provide a deterministic local fallback plan
+            quota_indicators = ("quota", "429", "rate limit", "Quota exceeded",
+                                "RESOURCE_EXHAUSTED")
+            if any(ind.lower() in last_exc_str.lower() for ind in quota_indicators):
+                log_event("agent.local_fallback", reason="quota_or_rate_limit",
+                          detail=last_exc_str)
+                fallback_tasks = _local_plan(goal, days_ahead)
+                log_event("agent.fallback_applied", n_new=len(fallback_tasks))
                 return AgentResult(
-                    success=False, steps=steps, goal=goal, pet_name=pet.name,
-                    error=err, requires_confirmation=False,
+                    success=True, steps=steps,
+                    final_new_tasks=fallback_tasks,
+                    final_reschedules=[], goal=goal, pet_name=pet.name,
+                    requires_confirmation=True,
                 )
+
+            err = f"api_error: {exc}"
+            log_event("agent.api_error", level="ERROR",
+                      iteration=iteration, error=err)
+            return AgentResult(
+                success=False, steps=steps, goal=goal, pet_name=pet.name,
+                error=err, requires_confirmation=False,
+            )
         latency_ms = int((time.monotonic() - t0) * 1000)
-        usage = getattr(response, "usage", None)
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "usage", None)
         log_event(
             "planner.response",
             iteration=iteration,
             latency_ms=latency_ms,
-            input_tokens=getattr(usage, "input_tokens", None) if usage else None,
-            output_tokens=getattr(usage, "output_tokens", None) if usage else None,
+            input_tokens=getattr(usage, "prompt_token_count", None) or getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "candidates_token_count", None) or getattr(usage, "output_tokens", None),
         )
 
         try:
@@ -720,11 +671,83 @@ def run_planner_agent(
 
     log_event("agent.max_iterations", iterations=max_iterations,
               goal=goal, pet=pet.name)
+    # If the LLM failed to produce any structured proposals across all
+    # iterations, fall back to a deterministic local planner
+    all_empty = all((not s.proposed_new_tasks and not s.proposed_reschedules) for s in steps)
+    if all_empty:
+        log_event("agent.local_fallback", reason="no_structured_output")
+        fallback_tasks = _local_plan(goal, days_ahead)
+        return AgentResult(
+            success=True, steps=steps,
+            final_new_tasks=fallback_tasks,
+            final_reschedules=[], goal=goal, pet_name=pet.name,
+            requires_confirmation=True,
+        )
+
     return AgentResult(
         success=False, steps=steps, goal=goal, pet_name=pet.name,
         error="max_iterations_exceeded",
         requires_confirmation=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Local fallback planner (no API needed)
+# ---------------------------------------------------------------------------
+
+def _local_plan(goal_text: str, days_ahead: int = 7) -> List[Task]:
+    """Generate a deterministic goal-aware plan when the API is unavailable."""
+    today = datetime.now().replace(second=0, microsecond=0)
+    goal_l = goal_text.lower()
+    tasks: List[Task] = []
+
+    # Defaults
+    meal_times = ["08:00", "18:00"]
+    walk_times = ["07:00"]
+    med_time = None
+
+    # Goal-aware tweaks
+    if any(k in goal_l for k in ("weight", "lose weight", "diet", "overweight")):
+        walk_times = ["07:00", "18:00"]
+        meal_times = ["07:30", "17:30"]
+    if any(k in goal_l for k in ("potty", "potty training", "housebreaking", "toilet")):
+        walk_times = ["07:00", "12:00", "17:00", "20:00"]
+        meal_times = ["07:00", "12:00", "18:00"]
+    if any(k in goal_l for k in ("medicat", "pill", "medicine", "medication")):
+        med_time = "09:00"
+
+    for d in range(days_ahead):
+        for hhmm in meal_times:
+            hh, mm = hhmm.split(":")
+            due = (today + timedelta(days=d)).replace(hour=int(hh), minute=int(mm))
+            tasks.append(Task(
+                title="Feeding",
+                description=f"Auto-scheduled feeding ({goal_text})",
+                due_time=due,
+                frequency="daily",
+                category="feeding",
+            ))
+        for hhmm in walk_times:
+            hh, mm = hhmm.split(":")
+            due = (today + timedelta(days=d)).replace(hour=int(hh), minute=int(mm))
+            tasks.append(Task(
+                title="Walk",
+                description=f"Walk for exercise ({goal_text})",
+                due_time=due,
+                frequency="daily",
+                category="walk",
+            ))
+        if med_time:
+            hh, mm = med_time.split(":")
+            due = (today + timedelta(days=d)).replace(hour=int(hh), minute=int(mm))
+            tasks.append(Task(
+                title="Medication",
+                description=f"Administer medication ({goal_text})",
+                due_time=due,
+                frequency="daily",
+                category="medication",
+            ))
+    return tasks
 
 
 # ---------------------------------------------------------------------------

@@ -247,6 +247,84 @@ class Scheduler:
 
         return warnings
 
+    def validate_proposed_changes(
+        self,
+        new_tasks: List[Task],
+        reschedules: Optional[List[Tuple[Task, datetime]]] = None,
+        window_minutes: int = 30,
+    ) -> List[str]:
+        """Return human-readable conflict warnings for an agent's proposed plan.
+
+        Builds a 'what-if' view of the schedule: existing pending tasks
+        (with rescheduled ones moved to their new times) plus the proposed
+        new tasks. Flags any pair within window_minutes where at least one
+        side is a proposed change. Pre-existing user conflicts are ignored —
+        we don't blame the agent for the user's own scheduling collisions.
+
+        Args:
+            new_tasks:    Tasks the agent wants to add.
+            reschedules:  (existing_task, new_due_time) pairs to move.
+            window_minutes: Conflict window (default 30).
+
+        Returns an empty list when the proposed changes are conflict-free.
+        Reuses the same string format as get_conflict_warnings() so the
+        agent and the human user see identical messages.
+        """
+        reschedules = reschedules or []
+        rescheduled_ids = {id(t): new_time for t, new_time in reschedules}
+
+        task_to_pet: dict = {
+            id(task): pet.name
+            for pet in self.owner.pets
+            for task in pet.tasks
+        }
+
+        # Each entry: (effective_due_time, title, pet_name, is_proposed_change)
+        entries: List[Tuple[datetime, str, str, bool]] = []
+        for task in self.get_all_tasks():
+            if task.is_completed:
+                continue
+            if id(task) in rescheduled_ids:
+                entries.append((rescheduled_ids[id(task)], task.title,
+                                task_to_pet.get(id(task), "Unknown"), True))
+            else:
+                entries.append((task.due_time, task.title,
+                                task_to_pet.get(id(task), "Unknown"), False))
+        for task in new_tasks:
+            # Proposed new tasks are not yet attached to any pet
+            entries.append((task.due_time, task.title, "(proposed)", True))
+
+        window = timedelta(minutes=window_minutes)
+        warnings: List[str] = []
+
+        for i, e1 in enumerate(entries):
+            time1, title1, pet1, prop1 = e1
+            for e2 in entries[i + 1:]:
+                time2, title2, pet2, prop2 = e2
+                if not (prop1 or prop2):
+                    continue  # ignore pre-existing user conflicts
+                gap = abs(time1 - time2)
+                if gap > window:
+                    continue
+                t1_str = time1.strftime("%I:%M %p")
+                t2_str = time2.strftime("%I:%M %p")
+                gap_mins = int(gap.total_seconds() // 60)
+                scope = (
+                    f"same pet ({pet1})" if pet1 == pet2
+                    else f"{pet1} and {pet2}"
+                )
+                if gap_mins == 0:
+                    warnings.append(
+                        f"'{title1}' and '{title2}' are both scheduled at "
+                        f"{t1_str} ({scope}) — exact overlap!"
+                    )
+                else:
+                    warnings.append(
+                        f"'{title1}' ({t1_str}) and '{title2}' ({t2_str}) "
+                        f"are only {gap_mins} min apart ({scope})"
+                    )
+        return warnings
+
     def mark_task_complete(self, task: Task) -> Optional[Task]:
         """Mark task complete and auto-schedule the next occurrence for recurring tasks.
 

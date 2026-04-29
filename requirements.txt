@@ -1,6 +1,4 @@
 streamlit>=1.30
 pytest>=7.0
-# Prefer Google Gemini if GEMINI_API_KEY is provided. Keep Anthropic as a fallback.
-google-generativeai>=0.3
-anthropic>=0.40
+google-genai>=1.0
 python-dotenv>=1.0

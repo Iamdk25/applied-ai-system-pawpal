@@ -1,0 +1,23 @@
+flowchart TB
+    User[User] -->|goal + pet selection| UI[Streamlit app.py]
+    UI -->|run_planner_agent| Agent[pawpal_agent.py]
+
+    subgraph Loop ["Revision loop (max N=3)"]
+      direction TB
+      Agent -->|prompt + existing tasks + prior feedback| Planner["Planner LLM call<br/>Claude Sonnet 4.6<br/>tool_use: submit_plan"]
+      Planner -->|JSON: new_tasks + reschedules| Parser["parse + guardrails"]
+      Parser -->|List Task + reschedule tuples| Reviewer["Reviewer<br/>Scheduler.validate_proposed_changes<br/>30-min window"]
+      Reviewer -->|warnings| Agent
+    end
+
+    Reviewer -->|empty warnings| Stage["Stage AgentResult<br/>requires_confirmation=True"]
+    Stage --> UI
+    UI -->|user clicks Confirm & Apply| Commit["commit_agent_result:<br/>pet.add_task + task.update_time"]
+    Agent -->|JSON events| Logger["agent_logging.py<br/>pawpal_agent.log"]
+
+    Existing["Scheduler<br/>existing pending tasks"] --> Reviewer
+
+    style Planner fill:#e8f0fe,stroke:#1a73e8
+    style Reviewer fill:#fef7e0,stroke:#f9ab00
+    style Commit fill:#e6f4ea,stroke:#1e8e3e
+    style Stage fill:#f3e5f5,stroke:#8e24aa

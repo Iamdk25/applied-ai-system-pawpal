@@ -179,17 +179,17 @@ st.caption(
     "You confirm before any tasks are added."
 )
 
-# Prefer GEMINI_API_KEY (Google Gemini); fall back to ANTHROPIC_API_KEY
-_api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+# Check for GEMINI_API_KEY
+_api_key = os.environ.get("GEMINI_API_KEY")
 if not _api_key:
     try:
-        _api_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY")  # type: ignore[attr-defined]
+        _api_key = st.secrets.get("GEMINI_API_KEY")  # type: ignore[attr-defined]
     except Exception:
         _api_key = None
 
 if not _api_key:
     st.info(
-        "Set `GEMINI_API_KEY` (preferred) or `ANTHROPIC_API_KEY` in `.env` (copy `.env.example`) "
+        "Set `GEMINI_API_KEY` in `.env` (copy `.env.example`) "
         "or in Streamlit secrets to enable the AI Planner."
     )
 elif not current_pets:

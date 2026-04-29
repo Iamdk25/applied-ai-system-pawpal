@@ -94,7 +94,7 @@ def test_conflict_detection_flags_duplicate_times():
     warnings = scheduler.get_conflict_warnings()
 
     assert len(warnings) >= 1, "Expected at least one conflict warning for duplicate times"
-    assert any("WARNING:" in w for w in warnings)
+    assert any("exact overlap" in w for w in warnings)
 
 
 def test_no_conflict_when_times_differ():
