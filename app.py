@@ -1,4 +1,13 @@
+import os
+
 import streamlit as st
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from pawpal_system import Owner, Pet, Task, Scheduler
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
@@ -46,6 +55,7 @@ if "owner" not in st.session_state:
     st.session_state.owner = Owner("Jordan", "")
 
 owner = st.session_state.owner  # convenient shorthand used throughout
+scheduler = Scheduler(owner)    # shared across the AI Planner and Build Schedule sections
 
 # ------------------------------------------------------------------
 # SECTION 1 — Add a Pet
@@ -160,11 +170,152 @@ else:
 st.divider()
 
 # ------------------------------------------------------------------
+# SECTION 2.5 — AI Planner (agentic workflow)
+# ------------------------------------------------------------------
+st.subheader("🤖 AI Planner (agentic)")
+st.caption(
+    "Describe a high-level care goal and the agent will draft a 7-day plan, "
+    "check it against your existing schedule for conflicts, and revise until clean. "
+    "You confirm before any tasks are added."
+)
+
+# Prefer GEMINI_API_KEY (Google Gemini); fall back to ANTHROPIC_API_KEY
+_api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+if not _api_key:
+    try:
+        _api_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY")  # type: ignore[attr-defined]
+    except Exception:
+        _api_key = None
+
+if not _api_key:
+    st.info(
+        "Set `GEMINI_API_KEY` (preferred) or `ANTHROPIC_API_KEY` in `.env` (copy `.env.example`) "
+        "or in Streamlit secrets to enable the AI Planner."
+    )
+elif not current_pets:
+    st.info("Add at least one pet before using the AI Planner.")
+else:
+    ai_pet_name = st.selectbox(
+        "Plan for which pet?",
+        [p.name for p in current_pets],
+        key="ai_pet_select",
+    )
+    ai_goal = st.text_area(
+        "Care goal",
+        placeholder="e.g. 'Help my senior dog lose weight over the next week'",
+        max_chars=500,
+        key="ai_goal",
+    )
+    col_run, col_iter = st.columns([1, 2])
+    with col_iter:
+        ai_max_iter = st.slider("Max revisions", 1, 5, 3, key="ai_max_iter")
+    with col_run:
+        run_clicked = st.button(
+            "Generate plan", type="primary",
+            disabled=not (ai_goal and ai_goal.strip()),
+        )
+
+    if run_clicked:
+        from pawpal_agent import run_planner_agent
+        target_pet = next(p for p in current_pets if p.name == ai_pet_name)
+        with st.spinner("Planner is drafting and reviewing your plan..."):
+            try:
+                result = run_planner_agent(
+                    goal=ai_goal,
+                    pet=target_pet,
+                    scheduler=scheduler,
+                    max_iterations=ai_max_iter,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Agent failed: {exc}")
+                result = None
+        if result is not None:
+            st.session_state.last_agent_result = result
+            st.session_state.last_agent_pet_name = ai_pet_name
+
+    result = st.session_state.get("last_agent_result")
+    if result is not None:
+        if result.success:
+            st.success(
+                f"Plan ready for **{result.pet_name}** "
+                f"(after {len(result.steps)} iteration(s)). "
+                "Review below and click Confirm to add it to the schedule."
+            )
+        elif result.error == "max_iterations_exceeded":
+            st.warning(
+                f"Agent could not produce a conflict-free plan in "
+                f"{len(result.steps)} iteration(s). See the trace below."
+            )
+        elif result.error and result.error.startswith("invalid_goal"):
+            st.error(f"Goal rejected by guardrails: {result.error}")
+        else:
+            st.error(f"Agent failed: {result.error}")
+
+        # ── Reasoning trace (default-expanded on failure) ─────────────
+        with st.expander("Agent reasoning trace", expanded=not result.success):
+            for step in result.steps:
+                badge = "✅ PASSED" if step.review_passed else "🔁 REVISING"
+                st.markdown(
+                    f"**Iteration {step.iteration}** — {badge} "
+                    f"({step.latency_ms} ms)"
+                )
+                if step.llm_reasoning:
+                    st.caption(f"Reasoning: {step.llm_reasoning}")
+                if step.proposed_new_tasks:
+                    st.write(f"Proposed {len(step.proposed_new_tasks)} new task(s):")
+                    for t in step.proposed_new_tasks:
+                        st.write(
+                            f"  • `{t.due_time.strftime('%a %b %d · %I:%M %p')}` "
+                            f"[{t.category}] **{t.title}** ({t.frequency})"
+                        )
+                if step.proposed_reschedules:
+                    st.write(f"Proposed {len(step.proposed_reschedules)} reschedule(s):")
+                    for old_task, new_time in step.proposed_reschedules:
+                        st.write(
+                            f"  • Move **{old_task.title}** "
+                            f"from `{old_task.due_time.strftime('%a %b %d %I:%M %p')}` "
+                            f"→ `{new_time.strftime('%a %b %d %I:%M %p')}`"
+                        )
+                if step.review_feedback:
+                    for w in step.review_feedback:
+                        st.warning(w)
+                st.divider()
+
+        # ── Confirmation panel (only on success) ──────────────────────
+        if result.success and result.requires_confirmation:
+            st.markdown("**Confirm and apply?**")
+            st.write(
+                f"This will add **{len(result.final_new_tasks)}** new task(s) "
+                f"and reschedule **{len(result.final_reschedules)}** existing task(s)."
+            )
+            col_yes, col_no = st.columns(2)
+            with col_yes:
+                if st.button("✅ Confirm & Apply", type="primary", key="ai_confirm"):
+                    from pawpal_agent import commit_agent_result
+                    target_pet = next(
+                        p for p in current_pets
+                        if p.name == st.session_state.get("last_agent_pet_name", "")
+                    )
+                    commit_agent_result(result, target_pet)
+                    st.session_state.last_agent_result = None
+                    st.session_state.completion_msg = (
+                        f"AI plan applied to {target_pet.name}: "
+                        f"{len(result.final_new_tasks)} added, "
+                        f"{len(result.final_reschedules)} rescheduled."
+                    )
+                    st.rerun()
+            with col_no:
+                if st.button("❌ Discard", key="ai_discard"):
+                    st.session_state.last_agent_result = None
+                    st.rerun()
+
+st.divider()
+
+# ------------------------------------------------------------------
 # SECTION 3 — Schedule: sort, filter, complete, conflict detection
 # ------------------------------------------------------------------
 st.subheader("Build Schedule")
 
-scheduler = Scheduler(owner)
 all_tasks = owner.get_all_tasks()
 
 # Persist the completion message across the rerun triggered by st.rerun()
